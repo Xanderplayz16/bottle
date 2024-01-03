@@ -1390,39 +1390,21 @@ class BaseRequest(object):
                 post[key] = value
             return post
 
-        if py >= (3,11,0):
-            post.recode_unicode = False
-            charset = options.get("charset", "utf8")
-            boundary = options.get("boundary", "")
-            if not boundary:
-                raise MultipartError("Invalid content type header, missing boundary")
-            parser = _MultipartParser(self.body, boundary, self.content_length,
-                mem_limit=self.MEMFILE_MAX,  memfile_limit=self.MEMFILE_MAX,
-                charset=charset)
+        post.recode_unicode = False
+        charset = options.get("charset", "utf8")
+        boundary = options.get("boundary")
+        if not boundary:
+            raise MultipartError("Invalid content type header, missing boundary")
+        parser = _MultipartParser(self.body, boundary, self.content_length,
+            mem_limit=self.MEMFILE_MAX, memfile_limit=self.MEMFILE_MAX,
+            charset=charset)
 
-            for part in parser:
-                if not part.filename and part.is_buffered():
-                    post[part.name] = part.value
-                else:
-                    post[part.name] = FileUpload(part.file, part.name,
-                                                part.filename, part.headerlist)
-
-        else:
-            safe_env = {'QUERY_STRING': ''}  # Build a safe environment for cgi
-            for key in ('REQUEST_METHOD', 'CONTENT_TYPE', 'CONTENT_LENGTH'):
-                if key in self.environ: safe_env[key] = self.environ[key]
-            args = dict(fp=self.body, environ=safe_env, keep_blank_values=True)
-            if py3k:
-                args['encoding'] = 'utf8'
-                post.recode_unicode = False
-            data = cgi.FieldStorage(**args)
-            self['_cgi.FieldStorage'] = data  #http://bugs.python.org/issue18394
-            for item in data.list or []:
-                if item.filename is None:
-                    post[item.name] = item.value
-                else:
-                    post[item.name] = FileUpload(item.file, item.name,
-                                                item.filename, item.headers)
+        for part in parser.parse():
+            if not part.filename and part.is_buffered():
+                post[part.name] = tonat(part.value, 'utf8')
+            else:
+                post[part.name] = FileUpload(part.file, part.name,
+                                            part.filename, part.headerlist)
 
         return post
 
@@ -3036,7 +3018,7 @@ def _parse_http_header(h):
             values.append((parts[0].strip(), {}))
             for attr in parts[1:]:
                 name, value = attr.split('=', 1)
-                values[-1][1][name.strip()] = value.strip()
+                values[-1][1][name.strip().lower()] = value.strip()
     else:
         lop, key, attrs = ',', None, {}
         for quoted, plain, tok in _hsplit(h):
@@ -3048,9 +3030,9 @@ def _parse_http_header(h):
                 if tok == '=':
                     key = value
                 else:
-                    attrs[value] = ''
+                    attrs[value.strip().lower()] = ''
             elif lop == '=' and key:
-                attrs[key] = value
+                attrs[key.strip().lower()] = value
                 key = None
             lop = tok
     return values
@@ -3240,13 +3222,6 @@ class _MultipartParser(object):
         buffer_size=2 ** 16,
         charset="latin1",
     ):
-        """ Parse a multipart/form-data byte stream. This object is an iterator
-            over the parts of the message.
-
-            :param stream: A file-like stream. Must implement ``.read(size)``.
-            :param boundary: The multipart boundary as a byte string.
-            :param content_length: The maximum number of bytes to read.
-        """
         self.stream = stream
         self.boundary = boundary
         self.content_length = content_length
@@ -3256,70 +3231,57 @@ class _MultipartParser(object):
         self.buffer_size = min(buffer_size, self.mem_limit)
         self.charset = charset
 
+        if not boundary:
+            raise MultipartError("No boundary.")
+
         if self.buffer_size - 6 < len(boundary):  # "--boundary--\r\n"
             raise MultipartError("Boundary does not fit into buffer_size.")
 
-        self._done = []
-        self._part_iter = None
-
-    def __iter__(self):
-        """ Iterate over the parts of the multipart message. """
-        if not self._part_iter:
-            self._part_iter = self._iterparse()
-
-        for part in self._done:
-            yield part
-
-        for part in self._part_iter:
-            self._done.append(part)
-            yield part
-
     def _lineiter(self):
-        """ Iterate over a binary file-like object line by line. Each line is
-            returned as a (line, line_ending) tuple. If the line does not fit
-            into self.buffer_size, line_ending is empty and the rest of the line
-            is returned with the next iteration.
+        """ Iterate over a binary file-like object (crlf terminated) line by
+            line. Each line is returned as a (line, crlf) tuple. Lines larger
+            than buffer_size are split into chunks where all but the last chunk
+            has an empty string instead of crlf. Maximum chunk size is twice the
+            buffer size.
         """
+
         read = self.stream.read
         maxread, maxbuf = self.content_length, self.buffer_size
-        buffer = b""  # buffer for the last (partial) line
+        partial = b""  # Contains the last (partial) line
 
         while True:
-            data = read(maxbuf if maxread < 0 else min(maxbuf, maxread))
-            maxread -= len(data)
-            lines = (buffer + data).splitlines(True)
-            len_first_line = len(lines[0])
-
-            # be sure that the first line does not become too big
-            if len_first_line > self.buffer_size:
-                # at the same time don't split a '\r\n' accidentally
-                if len_first_line == self.buffer_size + 1 and lines[0].endswith(b"\r\n"):
-                    splitpos = self.buffer_size - 1
-                else:
-                    splitpos = self.buffer_size
-                lines[:1] = [lines[0][:splitpos], lines[0][splitpos:]]
-
-            if data:
-                buffer = lines[-1]
-                lines = lines[:-1]
-
-            for line in lines:
-                if line.endswith(b"\r\n"):
-                    yield line[:-2], b"\r\n"
-                elif line.endswith(b"\n"):
-                    yield line[:-1], b"\n"
-                elif line.endswith(b"\r"):
-                    yield line[:-1], b"\r"
-                else:
-                    yield line, b""
-
-            if not data:
+            chunk = read(maxbuf if maxread < 0 else min(maxbuf, maxread))
+            maxread -= len(chunk)
+            if not chunk:
+                if partial:
+                    yield partial, b''
                 break
 
-    def _iterparse(self):
+            if partial:
+                chunk = partial + chunk
+
+            scanpos = 0
+            while True:
+                i = chunk.find(b'\r\n', scanpos)
+                if i >= 0:
+                    yield chunk[scanpos:i], b'\r\n'
+                    scanpos = i + 2
+                else: # CRLF not found
+                    partial = chunk[scanpos:] if scanpos else chunk
+                    break
+
+            if len(partial) > maxbuf:
+                yield partial[:-1], b""
+                partial = partial[-1:]
+
+    def parse(self):
+        """ Return a MultiPart iterator. Can only be called once. """
+
         lines, line = self._lineiter(), ""
         separator = b"--" + tob(self.boundary)
-        terminator = b"--" + tob(self.boundary) + b"--"
+        terminator = separator + b"--"
+        mem_used, disk_used = 0, 0  # Track used resources to prevent DoS
+        is_tail = False  # True if the last line was incomplete (cutted)
 
         # Consume first boundary. Ignore any preamble, as required by RFC
         # 2046, section 5.1.1.
@@ -3329,46 +3291,34 @@ class _MultipartParser(object):
         else:
             raise MultipartError("Stream does not contain boundary")
 
-        # Check for empty data
+        # First line is termainating boundary -> empty multipart stream
         if line == terminator:
             for _ in lines:
-                raise MultipartError("Data after end of stream")
+                raise MultipartError("Found data after empty multipart stream")
             return
 
-        # For each part in stream...
-        mem_used, disk_used = 0, 0  # Track used resources to prevent DoS
-        is_tail = False  # True if the last line was incomplete (cutted)
-
-        opts = {
+        part_options = {
             "buffer_size": self.buffer_size,
             "memfile_limit": self.memfile_limit,
             "charset": self.charset,
         }
-
-        part = _MultipartPart(**opts)
+        part = _MultipartPart(**part_options)
 
         for line, nl in lines:
-            if line == terminator and not is_tail:
-                part.file.seek(0)
-                yield part
-                break
-
-            elif line == separator and not is_tail:
+            if not is_tail and (line == separator or line == terminator):
+                part.finish()
                 if part.is_buffered():
                     mem_used += part.size
                 else:
                     disk_used += part.size
-                part.file.seek(0)
-
                 yield part
-
-                part = _MultipartPart(**opts)
-
+                if line == terminator:
+                    break
+                part = _MultipartPart(**part_options)
             else:
                 is_tail = not nl  # The next line continues this one
                 try:
                     part.feed(line, nl)
-
                     if part.is_buffered():
                         if part.size + mem_used > self.mem_limit:
                             raise MultipartError("Memory limit reached.")
@@ -3436,7 +3386,13 @@ class _MultipartPart(object):
         if self.size > self.memfile_limit and isinstance(self.file, BytesIO):
             self.file, old = NamedTemporaryFile(mode="w+b"), self.file
             old.seek(0)
-            copy_file(old, self.file, self.size, self.buffer_size)
+
+            copied, maxcopy, chunksize = 0, self.size, self.buffer_size
+            read, write = old.read, self.file.write
+            while copied < maxcopy:
+                chunk = read(min(chunksize, maxcopy - copied))
+                write(chunk)
+                copied += len(chunk)
 
     def finish_header(self):
         self.file = BytesIO()
@@ -3457,6 +3413,11 @@ class _MultipartPart(object):
         self.content_type, options = _parse_http_header(content_type)[0]
         self.charset = options.get("charset") or self.charset
         self.content_length = int(self.headers.get("Content-Length", "-1"))
+
+    def finish(self):
+        if not self.file:
+            raise MultipartError("Incomplete part: Header section not closed.")
+        self.file.seek(0)
 
     def is_buffered(self):
         """ Return true if the data is fully buffered in memory."""
@@ -3479,7 +3440,10 @@ class _MultipartPart(object):
         finally:
             self.file.seek(pos)
 
-
+    def close(self):
+        if self.file:
+            self.file.close()
+            self.file = False
 
 ###############################################################################
 # Server Adapter ###############################################################
