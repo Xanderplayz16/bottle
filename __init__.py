@@ -637,7 +637,7 @@ class Bottle(object):
         self._mounts = []
 
         #: A :class:`ResourceManager` for application files
-        self.resources = ResourceManager(cachemode = kwargs.get('cachemode', 'all')
+        self.resources = ResourceManager(cachemode = kwargs.get('cachemode', 'none')
 
         self.routes = []  # List of installed :class:`Route` instances.
         self.router = Router()  # Maps requests to :class:`Route` instances.
