@@ -430,7 +430,7 @@ class Router(object):
         comborules = self.dyna_regexes[method] = []
         maxgroups = self._MAX_GROUPS_PER_PATTERN
         for x in range(0, len(all_rules), maxgroups):
-            some = all_rules[x:x + maxgroups]
+            some = all_rules[x:x + maxgroups] 
             combined = (flatpat for (_, flatpat, _, _) in some)
             combined = '|'.join('(^%s$)' % flatpat for flatpat in combined)
             combined = re.compile(combined).match
@@ -637,7 +637,7 @@ class Bottle(object):
         self._mounts = []
 
         #: A :class:`ResourceManager` for application files
-        self.resources = ResourceManager(cachemode = kwargs.get('cachemode', 'none')
+        self.resources = ResourceManager(cachemode = kwargs.get('cachemode', 'none'))
 
         self.routes = []  # List of installed :class:`Route` instances.
         self.router = Router()  # Maps requests to :class:`Route` instances.
